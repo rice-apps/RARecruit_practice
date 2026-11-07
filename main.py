@@ -4,11 +4,11 @@ import os
 import flask
 import json
 import requests
+import secrets
 
 import google.oauth2.credentials
 import google_auth_oauthlib.flow
 import googleapiclient.discovery
-from google.oauth2 import id_token
 from pymongo import MongoClient
 from google.auth.transport.requests import Request as GoogleRequest
 from google.oauth2 import id_token
@@ -38,6 +38,125 @@ mongodb_client = MongoClient("mongodb+srv://mjs37_db_user:ditcCwkVknOhnePC@recru
 users_db = mongodb_client["users"]
 
 users_collection = users_db["users"]
+
+# Roles an admin can assign from the dashboard.
+ROLES = ["applicant", "admin"]
+
+
+def current_user():
+  """The logged-in user's document from MongoDB, or None if not logged in."""
+  google_id = flask.session.get("google_id")
+  if not google_id:
+    return None
+  return users_collection.find_one({"google_id": google_id})
+
+
+def get_csrf_token():
+  """Per-session token that the admin form must send back, so other sites
+  can't trick an admin's browser into changing roles."""
+  if "csrf_token" not in flask.session:
+    flask.session["csrf_token"] = secrets.token_urlsafe(32)
+  return flask.session["csrf_token"]
+
+
+USER_PAGE = """
+<!doctype html>
+<title>Dashboard</title>
+<p>Logged in as {{ user.name or user.email }} &mdash; role: <b>{{ user.role }}</b></p>
+<p><a href="/logout">Log out</a></p>
+"""
+
+ADMIN_PAGE = """
+<!doctype html>
+<title>Admin dashboard</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 2rem; }
+  table { border-collapse: collapse; }
+  th, td { border: 1px solid #ccc; padding: .4rem .8rem; text-align: left; }
+  .msg { background: #eef6ee; padding: .5rem; }
+</style>
+<p>Logged in as {{ me.name or me.email }} &mdash; role: <b>admin</b> &middot; <a href="/logout">Log out</a></p>
+{% for msg in get_flashed_messages() %}<p class="msg">{{ msg }}</p>{% endfor %}
+<h1>Users</h1>
+<table>
+  <tr><th>Name</th><th>Email</th><th>Role</th></tr>
+  {% for u in users %}
+  <tr>
+    <td>{{ u.name }}</td>
+    <td>{{ u.email }}</td>
+    <td>
+      {% if u.google_id == me.google_id %}
+        {{ u.role }} (you)
+      {% else %}
+      <form method="post" action="{{ url_for('update_role', google_id=u.google_id) }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <select name="role">
+          {% for r in roles %}
+          <option value="{{ r }}" {% if r == u.role %}selected{% endif %}>{{ r }}</option>
+          {% endfor %}
+        </select>
+        <button type="submit">Save</button>
+      </form>
+      {% endif %}
+    </td>
+  </tr>
+  {% endfor %}
+</table>
+"""
+
+
+@app.route('/dashboard')
+def dashboard():
+  user = current_user()
+  if not user:
+    return flask.redirect('/authorize')
+
+  if user.get("role") != "admin":
+    return flask.render_template_string(USER_PAGE, user=user)
+
+  users = list(users_collection.find(
+      {}, {"_id": 0, "google_id": 1, "name": 1, "email": 1, "role": 1},
+      sort=[("name", 1)]))
+  return flask.render_template_string(
+      ADMIN_PAGE, me=user, users=users, roles=ROLES, csrf_token=get_csrf_token())
+
+
+@app.route('/admin/users/<google_id>/role', methods=['POST'])
+def update_role(google_id):
+  user = current_user()
+  if not user:
+    return flask.redirect('/authorize')
+  # Re-check the role from the database on every request, never trust the page.
+  if user.get("role") != "admin":
+    flask.abort(403)
+
+  sent_token = flask.request.form.get("csrf_token", "")
+  expected_token = flask.session.get("csrf_token")
+  if not expected_token or not secrets.compare_digest(sent_token, expected_token):
+    flask.abort(400, "Invalid form token. Reload the page and try again.")
+
+  new_role = flask.request.form.get("role")
+  if new_role not in ROLES:
+    flask.abort(400, "Unknown role.")
+
+  if google_id == user["google_id"]:
+    flask.flash("You can't change your own role.")
+    return flask.redirect(flask.url_for('dashboard'))
+
+  result = users_collection.update_one(
+      {"google_id": google_id}, {"$set": {"role": new_role}})
+  if result.matched_count == 0:
+    flask.flash("User not found.")
+  else:
+    flask.flash(f"Role updated to {new_role}.")
+  return flask.redirect(flask.url_for('dashboard'))
+
+
+@app.route('/logout')
+def logout():
+  flask.session.clear()
+  return flask.redirect('/')
+
 
 @app.route('/')
 def index():
@@ -219,15 +338,10 @@ def oauth2callback():
 
       users_collection.insert_one(user_document)
 
-      flask.session["google_id"] = google_id
+  flask.session["google_id"] = google_id
 
-      return flask.redirect("/")
-
-  else:
-
-      flask.session["google_id"] = google_id
-
-      return flask.redirect("/clear")
+  # The dashboard checks the user's role and shows the right page.
+  return flask.redirect("/dashboard")
 
 
 
@@ -297,7 +411,10 @@ def check_granted_scopes(credentials):
   return features
 
 def print_index_table():
-  return ('<table>' + 
+  return ('<table>' +
+          '<tr><td><a href="/dashboard">Dashboard</a></td>' +
+          '<td>Sign in (if needed) and go to your dashboard. Admins can ' +
+          '    view users and change their roles here.</td></tr>' +
           '<tr><td><a href="/authorize">Test the auth flow directly</a></td>' +
           '<td>Go directly to the authorization flow. If there are stored ' +
           '    credentials, you still might not be prompted to reauthorize ' +
