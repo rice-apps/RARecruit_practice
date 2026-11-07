@@ -8,6 +8,10 @@ import requests
 import google.oauth2.credentials
 import google_auth_oauthlib.flow
 import googleapiclient.discovery
+from google.oauth2 import id_token
+from pymongo import MongoClient
+from google.auth.transport.requests import Request as GoogleRequest
+from google.oauth2 import id_token
 
 # This variable specifies the name of a file that contains the OAuth 2.0
 # information for this application, including its client_id and client_secret.
@@ -16,7 +20,10 @@ CLIENT_SECRETS_FILE = "secret.json"
 # The OAuth 2.0 access scope allows for access to the
 # authenticated user's account and requires requests to use an SSL connection.
 SCOPES = ['https://www.googleapis.com/auth/drive.metadata.readonly',
-          'https://www.googleapis.com/auth/calendar.readonly']
+          'https://www.googleapis.com/auth/calendar.readonly',
+          "openid",
+          "https://www.googleapis.com/auth/userinfo.email",
+          "https://www.googleapis.com/auth/userinfo.profile"]
 API_SERVICE_NAME = 'drive'
 API_VERSION = 'v2'
 
@@ -25,6 +32,12 @@ app = flask.Flask(__name__)
 # If you use this code in your application, replace this with a truly secret
 # key. See https://flask.palletsprojects.com/quickstart/#sessions.
 app.secret_key = "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"
+
+mongodb_client = MongoClient("mongodb+srv://mjs37_db_user:ditcCwkVknOhnePC@recruiting.nb4whlh.mongodb.net/")
+
+users_db = mongodb_client["users"]
+
+users_collection = users_db["users"]
 
 @app.route('/')
 def index():
@@ -131,14 +144,95 @@ def oauth2callback():
   # ACTION ITEM: In a production app, you likely want to save these
   #              credentials in a persistent database instead.
   credentials = flow.credentials
-  
-  credentials = credentials_to_dict(credentials)
-  flask.session['credentials'] = credentials
 
-  # Check which scopes user granted
-  features = check_granted_scopes(credentials)
-  flask.session['features'] = features
-  return flask.redirect('/')
+  # Save credentials in session
+
+  flask.session["credentials"] = credentials_to_dict(credentials)
+
+  # Check granted scopes
+
+  features = check_granted_scopes(flask.session["credentials"])
+
+  flask.session["features"] = features
+
+  # Get Google ID token
+
+  google_id_token = credentials.id_token
+
+  if not google_id_token:
+
+      return "Google ID token missing. Ensure 'openid' is in your scopes.", 400
+
+  # Verify Google ID token
+
+  try:
+
+    user_info = id_token.verify_oauth2_token(
+
+        google_id_token,
+
+        GoogleRequest(),
+
+        "240724484773-u2caekia4337vnrof7v337et4acbvdi8.apps.googleusercontent.com"
+
+)
+
+  except ValueError as e:
+
+      return f"Invalid Google ID token: {str(e)}", 401
+
+  # Extract user information
+
+  google_id = user_info.get("sub")
+
+  email = user_info.get("email")
+
+  name = user_info.get("name")
+
+  picture = user_info.get("picture")
+
+  # Verify required information
+
+  if not google_id or not email:
+
+      return "Missing required Google account information.", 400
+
+  # Look up user by permanent Google ID
+
+  user = users_collection.find_one({"google_id": google_id})
+
+  if not user:
+
+      user_document = {
+
+          "email": email,
+
+          "name": name,
+
+          "google_id": google_id,
+
+          "picture": picture,
+
+          "role": "applicant"
+
+      }
+
+      users_collection.insert_one(user_document)
+
+      flask.session["google_id"] = google_id
+
+      return flask.redirect("/")
+
+  else:
+
+      flask.session["google_id"] = google_id
+
+      return flask.redirect("/clear")
+
+
+
+
+  
   
 @app.route('/revoke')
 def revoke():
