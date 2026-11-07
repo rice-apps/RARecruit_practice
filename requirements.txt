@@ -1,0 +1,22 @@
+# Web framework + server
+fastapi
+uvicorn[standard]
+
+# Sessions for FastAPI (SessionMiddleware needs itsdangerous)
+itsdangerous
+
+# Google OAuth
+google-auth
+google-auth-oauthlib
+google-api-python-client
+requests
+
+# Load env.env into environment variables
+python-dotenv
+
+# Existing Flask sample (main.py)
+flask
+
+# Testing
+pytest
+httpx2
